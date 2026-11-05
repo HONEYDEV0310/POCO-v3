@@ -5,7 +5,7 @@ from pathlib import Path
 from modules.app_settings import AlarmSettings, SettingsManager
 
 from ipc.queue_utils import drain_ordered, get_latest, put_latest, put_ordered
-from services.buzzer_service import BuzzerService
+from services.buzzer_process_service import BuzzerProcessService
 from services.posture_alert_service import PostureAlertService
 from services.hardware_config_service import HardwareConfigService
 from services.imu_service import ADXL345IMUService
@@ -15,8 +15,9 @@ from services.monitor_arm_calibration_service import (
 from services.monitor_arm_preparation_controller import (
     MonitorArmPreparationController,
 )
-from services.monitor_arm_kinematics import JointCommand
+from services.monitor_arm_kinematics import JointCommand, SafetyLimits
 from services.monitor_arm_safety_supervisor import MonitorArmSafetySupervisor
+from services.monitor_arm_absence_controller import MonitorArmAbsenceController
 from services.monitor_arm_user_x import (
     ToFUserXSource,
 )
@@ -39,6 +40,26 @@ HW_READY_FOR_POSE_CALIBRATION = "READY_FOR_POSE_CALIBRATION"
 HW_MONITOR_ARM_PREPARING = "MONITOR_ARM_PREPARING"
 HW_POSE_CALIBRATING = "POSE_CALIBRATING"
 HW_MEASURING = "MEASURING"
+
+from services.monitor_arm_distance_setup import (
+    DistanceSetup, calibrated_limits, reachable_x_intervals, nearest_interval,
+)
+
+
+from services.monitor_arm_tracking_path import workspace_intervals
+
+
+def _configure_distance_runtime(motor12, record):
+    planner = motor12.planner
+    height = float(record['preferred_height_m'])
+    if not planner.working_z_min_m <= height <= planner.working_z_max_m:
+        raise ValueError('저장된 높이가 작업 범위를 벗어났습니다. 화면 준비를 다시 진행해 주세요.')
+    planner.limits = calibrated_limits(planner.limits, motor12._calibration_ranges())
+    planner.expanded_workspace = True
+    planner.desired_distance_m = float(record['preferred_distance_m'])
+    planner.reference_z_m = float(record['preferred_height_m'])
+    planner.cancel_working_pose_recovery()
+
 
 PROFILE_APPLY_POLL_INTERVAL_SEC = 0.20
 
@@ -75,6 +96,17 @@ def _extract_pose_landmark_state(pose_state):
     )
     landmarks = pose_state.get("landmarks") if valid else None
     return frame_id, landmarks, valid
+
+
+def _pose_state_is_fresh(pose_state, max_age_sec):
+    """A stalled camera/process must not keep an old person detection alive."""
+    if not isinstance(pose_state, dict):
+        return False
+    try:
+        age_sec = (time.perf_counter_ns() - int(pose_state["timestamp_ns"])) / 1e9
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return 0.0 <= age_sec <= max_age_sec
 
 
 def _read_joint_arrival(motor_service, targets, tolerance_deg):
@@ -219,7 +251,7 @@ def run_hardware_process(
     # 실제 부저를 몇 번 울릴지에 대한 PyQt 설정값.
     posture_alert_count = int(alarm_settings.posture_Hardware_count)
 
-    buzzer = BuzzerService()
+    buzzer = BuzzerProcessService()
 
     # 실제 제어 로직은 별도 Controller로 분리한다.
     motor12 = Motor12Controller(
@@ -227,6 +259,12 @@ def run_hardware_process(
         settings=monitor_arm_settings,
     )
     motor34 = Motor34Controller(motor_service)
+    distance_setup = DistanceSetup(
+        monitor_arm_settings['tof'].get('sensor_origin_x_m', 0.0),
+        monitor_arm_settings['tof'].get('minimum_range_m', .03),
+        monitor_arm_settings['tof'].get('maximum_range_m', 2.0),
+    )
+    distance_workspace_cache = None
     monitor_arm_preparation = MonitorArmPreparationController(
         motor_service,
         motor12,
@@ -242,9 +280,17 @@ def run_hardware_process(
     )
     presence_min_m = float(safety_cfg.get("presence_min_m", 0.30))
     presence_max_m = float(safety_cfg.get("presence_max_m", 1.50))
+    absence_controller = MonitorArmAbsenceController(
+        motor_service, motor12, motor34, monitor_arm_preparation.rest_gimbal_targets,
+        reacquire_sec=safety_cfg.get("reacquire_stable_sec", 1.0),
+        timeout_sec=monitor_arm_preparation.working_start_timeout_sec,
+        tolerance_deg=monitor_arm_preparation.arrival_tolerance_deg,
+        stable_samples=monitor_arm_preparation.arrival_stable_samples,
+    )
     active_profile_motor_angles = {}
     latest_safety_state = safety_supervisor.snapshot()
     stop_rest_pending = False
+    measurement_stopping = False
     stop_rest_started_at = None
     stop_rest_last_check_at = 0.0
     stop_rest_targets = {}
@@ -496,6 +542,8 @@ def run_hardware_process(
             main_mode = ""
             if isinstance(latest_main_state, dict):
                 main_mode = str(latest_main_state.get("state", "")).upper()
+            if main_mode != "MEASURING":
+                measurement_stopping = False
 
             # ==================================================
             # B. Main -> Hardware 명령 처리
@@ -503,7 +551,16 @@ def run_hardware_process(
             for event in drain_ordered(main_to_hw_event_queue):
                 event_type = _event_type(event)
 
+                if event_type == "MONITOR_ARM_AUTOMATIC_RETURN_RETRY":
+                    if main_mode == "MEASURING" and not measurement_stopping:
+                        absence_controller.retry(time.monotonic())
+                    continue
+
                 if event_type == "START_MONITOR_ARM_PREPARATION":
+                    distance_setup.cancel()
+                    if event.get('reset_distance_reference'):
+                        distance_setup.record = {}
+                        distance_setup.error = None
                     monitor_arm_preparation.begin()
                     monitor_arm_calibration.cancel()
                     monitor_arm_calibration_sensor_only = False
@@ -531,6 +588,15 @@ def run_hardware_process(
                         calibration_state = monitor_arm_calibration.restore(
                             profile.get("calibration") or {}
                         )
+                        if calibration_state.get('distance_setup'):
+                            distance_setup.restore(calibration_state['distance_setup'])
+                        else:
+                            distance_setup.record = {}
+                            motor12.planner.expanded_workspace = False
+                            motor12.planner.limits = SafetyLimits.from_settings(monitor_arm_settings)
+                            motor12.planner.desired_distance_m = float(
+                                monitor_arm_settings['distance']['desired_user_monitor_distance_m'])
+                            motor12.planner.reference_z_m = None
                         latest_imu_state = imu.restore_calibration(profile.get("imu") or {})
                         active_profile_motor_angles = dict(
                             profile.get("motor_angles_deg")
@@ -566,6 +632,8 @@ def run_hardware_process(
                         motor12_opened = bool(motor12.ready)
                         motor34_opened = bool(motor34.ready)
 
+                        if distance_setup.record.get('ready'):
+                            _configure_distance_runtime(motor12, distance_setup.record)
                         target12 = JointCommand(
                             profile_apply_targets["shoulder_lift"],
                             profile_apply_targets["elbow_flex"],
@@ -616,6 +684,7 @@ def run_hardware_process(
                     continue
 
                 if event_type == "MEASUREMENT_STOP_AND_REST":
+                    measurement_stopping = True
                     result12 = motor12.move_to_rest()
                     rest_gimbal = monitor_arm_preparation.rest_gimbal_targets
                     result34 = motor34.move_to_neutral(rest_gimbal)
@@ -670,6 +739,13 @@ def run_hardware_process(
                         )
                     continue
 
+                if distance_setup.running and event_type in {
+                        'MONITOR_ARM_MOVE_WORKING_START', 'MONITOR_ARM_MOVE_REST',
+                        'MONITOR_ARM_MANUAL_IK_TARGET', 'MONITOR_ARM_GIMBAL_JOG'}:
+                    _put_hardware_event(hw_to_main_event_queue, event_type + '_ACK',
+                                        success=False, message='ToF 측정 중에는 이동할 수 없습니다.')
+                    continue
+
                 if event_type == "MONITOR_ARM_MOVE_WORKING_START":
                     try:
                         target = monitor_arm_preparation.request_working_start()
@@ -719,6 +795,41 @@ def run_hardware_process(
                             success=False,
                             message=f"휴식자세 이동 실패: {error}",
                         )
+                    continue
+
+                if event_type in {'START_MONITOR_ARM_DISTANCE_CAPTURE', 'MONITOR_ARM_DISTANCE_TARGET'}:
+                    try:
+                        prep = monitor_arm_preparation.snapshot()
+                        if (not prep.get('active') or not prep.get('all_motors_ready')
+                                or not prep.get('working_start_completed') or prep.get('movement_active')
+                                or distance_setup.running or monitor_arm_calibration.running or imu.calibrating):
+                            raise ValueError('작업 위치에 도착하고 다른 측정이 끝난 뒤 시도해 주세요.')
+                        if event_type == 'START_MONITOR_ARM_DISTANCE_CAPTURE':
+                            monitor_arm_preparation.refresh_telemetry(force=True)
+                            pose = monitor_arm_preparation.current_pose
+                            if pose is None or monitor_arm_preparation.movement_status == 'telemetry_error':
+                                raise ValueError('현재 화면 위치를 읽지 못했습니다.')
+                            distance_setup.start(pose.x_m, pose.z_m)
+                            monitor_arm_calibration.cancel()
+                            message = '같은 자리에 앉아 주세요. ToF 거리를 5초 동안 측정합니다.'
+                        else:
+                            if not distance_setup.record.get('ready'):
+                                raise ValueError('먼저 ToF 거리 기준을 측정해 주세요.')
+                            distance = float(event['distance_m'])
+                            height = float(event['height_m'])
+                            monitor_arm_preparation.command_distance_target(
+                                distance_setup.record['tof_user_x_baseline_m'], distance, height)
+                            distance_setup.record.update(preferred_distance_m=distance, preferred_height_m=height)
+                            if monitor_arm_calibration.session_ready:
+                                monitor_arm_calibration.record['distance_setup'] = dict(distance_setup.record)
+                                monitor_arm_calibration._save_record(monitor_arm_calibration.record)
+                            message = '설정한 거리와 높이로 이동합니다.'
+                        success = True
+                    except Exception as error:
+                        success, message = False, str(error)
+                    _put_hardware_event(hw_to_main_event_queue, event_type + '_ACK',
+                                        success=success, message=message,
+                                        distance_setup=distance_setup.snapshot())
                     continue
 
                 if event_type == "MONITOR_ARM_MANUAL_IK_TARGET":
@@ -779,6 +890,12 @@ def run_hardware_process(
                 if event_type == "START_MONITOR_ARM_COMBINED_CAPTURE":
                     preparation_state = monitor_arm_preparation.snapshot()
                     missing = []
+                    reuse_distance = bool(event.get('reuse_distance_reference'))
+                    if reuse_distance and (distance_setup.running or not distance_setup.record.get('ready')):
+                        missing.append('2 화면 위치에서 ToF 거리 기준 측정')
+                    if (preparation_state.get('movement_active') or
+                            preparation_state.get('movement_status') in {'command_error', 'timeout', 'telemetry_error', 'safety_error'}):
+                        missing.append('화면 이동 완료')
                     if not enable_pose:
                         missing.append("POSE 기준 측정 모드")
                     if not imu_opened:
@@ -797,7 +914,8 @@ def run_hardware_process(
                         message = "통합 기준 저장을 시작할 수 없습니다: " + ", ".join(missing)
                     else:
                         try:
-                            monitor_arm_calibration.start()
+                            monitor_arm_calibration.start(
+                                distance_setup.record if reuse_distance else None)
                             monitor_arm_calibration_sensor_only = True
                             calibration_generation += 1
                             calibration_ready_emitted = False
@@ -918,6 +1036,7 @@ def run_hardware_process(
                     continue
 
                 if event_type == "CANCEL_MONITOR_ARM_PREPARATION":
+                    distance_setup.cancel()
                     monitor_arm_calibration.cancel()
                     monitor_arm_preparation.end()
                     workflow_state = HW_IDLE
@@ -1292,6 +1411,32 @@ def run_hardware_process(
             # 실제 I2C read는 설정된 주기로만 수행된다.
             latest_tof_state = tof_service.update()
 
+            if distance_setup.running:
+                distance_setup.add(latest_tof_state)
+                if distance_setup.finished:
+                    monitor_arm_preparation.refresh_telemetry(force=True)
+                    pose = monitor_arm_preparation.current_pose
+                    if pose is None or monitor_arm_preparation.movement_status == 'telemetry_error':
+                        distance_setup.cancel()
+                        distance_setup.error = '화면 위치를 확인하지 못했어요. 다시 측정해 주세요.'
+                    else:
+                        distance_setup.finish(pose.x_m, pose.z_m)
+                    if distance_setup.record.get('ready'):
+                        try:
+                            z = distance_setup.record['preferred_height_m']
+                            if not motor12.planner.working_z_min_m <= z <= motor12.planner.working_z_max_m:
+                                raise ValueError('화면 높이가 작업 범위 밖이에요. 작업 시작 위치로 먼저 이동해 주세요.')
+                            _configure_distance_runtime(motor12, distance_setup.record)
+                            monitor_arm_preparation.movement_status = 'completed'
+                            monitor_arm_preparation.last_error = None
+                        except Exception as error:
+                            distance_setup.record = {}
+                            distance_setup.error = str(error)
+                    _put_hardware_event(hw_to_main_event_queue, 'MONITOR_ARM_DISTANCE_CAPTURE_DONE',
+                                        success=bool(distance_setup.record.get('ready')),
+                                        message=distance_setup.error or 'ToF 거리 기준을 저장했어요.',
+                                        distance_setup=distance_setup.snapshot())
+
             if monitor_arm_calibration.running:
                 monitor_arm_calibration.add_tof_state(latest_tof_state)
                 monitor_arm_calibration.add_pose_state(latest_pose_state)
@@ -1425,9 +1570,20 @@ def run_hardware_process(
             # 포화하고, ToF 자체가 없거나 비정상이면 SAFE_HOLD한다.
             try:
                 tof_raw_user_x_m = tof_source.read_raw_user_x_m()
-                tof_user_x_m = tof_source.clamp_user_x_m(
-                    tof_raw_user_x_m
-                )
+                if getattr(motor12.planner, 'expanded_workspace', False):
+                    planner = motor12.planner
+                    ranges = motor12._calibration_ranges()
+                    workspace_key = (planner.working_z_min_m, planner.working_z_max_m, tuple(sorted(ranges.items())))
+                    if distance_workspace_cache is None or distance_workspace_cache[0] != workspace_key:
+                        distance_workspace_cache = (workspace_key, workspace_intervals(
+                            planner.kinematics, ranges, planner.working_z_min_m, planner.working_z_max_m))
+                    requested_x = tof_raw_user_x_m - planner.desired_distance_m
+                    current_x = (monitor_arm_preparation.current_pose.x_m
+                                 if monitor_arm_preparation.current_pose is not None else requested_x)
+                    low, high = nearest_interval(distance_workspace_cache[1], current_x)
+                    tof_user_x_m = max(low, min(requested_x, high)) + planner.desired_distance_m
+                else:
+                    tof_user_x_m = tof_source.clamp_user_x_m(tof_raw_user_x_m)
                 control_user_x_m = tof_user_x_m
                 control_saturated = bool(
                     abs(tof_user_x_m - tof_raw_user_x_m) > 1e-9
@@ -1476,37 +1632,34 @@ def run_hardware_process(
                 if isinstance(latest_pose_state, dict)
                 else None
             )
-            if main_mode == "MEASURING" and not stop_rest_pending:
+            automatic_return_enabled = bool(
+                main_mode == "MEASURING" and not measurement_stopping and not stop_rest_pending
+                and not monitor_arm_preparation.active and not profile_apply_pending
+            )
+            if automatic_return_enabled:
                 latest_safety_state = safety_supervisor.update(
                     tof_presence_valid,
                     latest_pose_landmark_valid,
                     pose_inference,
                     now=now,
                 )
-                if latest_safety_state.get("request_return", False):
-                    angles = active_profile_motor_angles or dict(
-                        monitor_arm_calibration.snapshot().get("motor_angles_deg") or {}
-                    )
-                    try:
-                        target = JointCommand(
-                            float(angles["shoulder_lift"]),
-                            float(angles["elbow_flex"]),
-                        )
-                        return12 = motor12.move_to_working_smooth(target)
-                    except Exception as error:
-                        return12 = {"accepted": False, "error": str(error)}
-                    return34 = motor34.move_to_neutral(angles)
-                    _put_hardware_event(
-                        hw_to_main_event_queue,
-                        "USER_ABSENT_RETURN_REQUESTED",
-                        success=bool(return12.get("accepted") and return34.get("accepted")),
-                        message="사용자 미검출 5초 지속: 작업 초기자세와 짐벌 중립각으로 복귀합니다.",
-                        motor12=return12,
-                        motor34=return34,
-                    )
             else:
                 safety_supervisor.reset()
                 latest_safety_state = safety_supervisor.snapshot(now)
+            automatic_return = absence_controller.update(
+                enabled=automatic_return_enabled,
+                absence_requested=latest_safety_state.get("return_latched", False),
+                presence_valid=bool(tof_presence_valid and latest_pose_landmark_valid),
+                now=now,
+            )
+            latest_safety_state["automatic_return"] = automatic_return
+            if absence_controller.blocks_tracking:
+                latest_safety_state["tracking_allowed"] = False
+                latest_safety_state["reason"] = automatic_return["reason"]
+            for return_event in absence_controller.drain_events():
+                _put_hardware_event(
+                    hw_to_main_event_queue, return_event.pop("type"), **return_event
+                )
             latest_safety_state["tof_presence_valid"] = tof_presence_valid
             latest_safety_state["landmark_presence_valid"] = latest_pose_landmark_valid
             landmark_quality = (
@@ -1775,9 +1928,26 @@ def run_hardware_process(
             measuring_for_alert = bool(
                 enable_pose
                 and main_mode == "MEASURING"
+                and not measurement_stopping
             )
 
-            if measuring_for_alert:
+            # Use presence, not tracking_allowed: bad posture intentionally
+            # blocks motor tracking but must still be able to trigger an alert.
+            alert_presence_valid = bool(
+                tof_presence_valid
+                and latest_pose_landmark_valid
+                and _pose_state_is_fresh(
+                    latest_pose_state, safety_supervisor.posture_stale_sec
+                )
+            )
+            if not measuring_for_alert or not alert_presence_valid:
+                # Silence immediately; do not wait for the 5-second rest timer.
+                # Cancel both the current beep and all queued repetitions.
+                if buzzer.get_state().get("busy", False):
+                    buzzer.stop(clear_pending=True)
+                posture_alert.reset_tracking(preserve_cooldowns=True)
+                last_alert_pose_frame_id = latest_pose_frame_id
+            else:
                 pose_inference = None
 
                 if isinstance(
@@ -1841,16 +2011,16 @@ def run_hardware_process(
                             posture_alert_count,
                         )
 
-            # BuzzerService는 sleep()을 사용하지 않는
-            # non-blocking 상태머신이다.
-            #
-            # MEASURING이 끝나더라도 이미 시작된 Alert는
-            # 현재 Pattern까지 정상적으로
-            # 마무리할 수 있도록 update()는 계속 호출한다.
+            # PWM and beep deadlines are owned by BuzzerProcess. This call only
+            # refreshes its heartbeat and reads state; sensor I/O cannot delay a beep.
             latest_buzzer_state = (
                 buzzer.update(
                     now=now
                 )
+            )
+            latest_buzzer_state["presence_valid"] = alert_presence_valid
+            latest_buzzer_state["alert_suppressed"] = bool(
+                not measuring_for_alert or not alert_presence_valid
             )
 
             # ==================================================
@@ -1899,6 +2069,8 @@ def run_hardware_process(
                     "monitor_arm_input": dict(latest_monitor_arm_input_state),
                     "monitor_arm": {
                         "calibration": monitor_arm_calibration.snapshot(),
+                        "distance_setup": distance_setup.snapshot(),
+                        "calibration_ranges": motor12._calibration_ranges() if motor12.ready else {},
                         "preparation": dict(latest_preparation_state),
                         "live_eye_gap_px": (
                             latest_pose_state.get("eye_gap_px")

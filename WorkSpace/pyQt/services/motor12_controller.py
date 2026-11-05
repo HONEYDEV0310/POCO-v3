@@ -1,4 +1,5 @@
 import math
+import os
 import time
 from dataclasses import dataclass
 
@@ -11,6 +12,7 @@ from services.monitor_arm_planner import (
     MonitorArmPlanner,
     RecoveryTimeoutError,
 )
+from services.monitor_arm_sag_compensation import SagCompensator
 from services.monitor_arm_speed import select_speed, validate_speed_profile
 
 MOTOR1_SERVO_ID = 1
@@ -53,6 +55,8 @@ class Motor12Controller:
 
     def __init__(self, motor_service, settings=None, update_hz=MOTOR12_UPDATE_HZ):
         self.motor = motor_service
+        self.sag = SagCompensator(os.environ.get('POCO_CONTROL_VARIANT') == 'v4')
+        self._sag_nominal = None
 
         # settings=None은 기존 self-test 호환을 위해 임시로 허용한다.
         # 실제 HardwareProcess에서는 WorkSpace/config의 고정 JSON을 항상 전달한다.
@@ -61,6 +65,8 @@ class Motor12Controller:
 
         self.settings = settings
         self.planner = MonitorArmPlanner(settings) if settings is not None else None
+        if self.sag.enabled and self.planner is not None:
+            self.planner.height_deadband_m = .0005
 
         # 팀원 standalone Motor1/2 코드의 Pose 추종 속도 정책을 그대로 사용한다.
         # settings=None은 기존 self-test 호환용이며 실제 HardwareProcess에서는
@@ -385,6 +391,8 @@ class Motor12Controller:
 
     def _reset_tracking_runtime(self, reset_reference=False):
         """일반 자동추종의 Runtime 상태를 초기화한다."""
+        self.sag.reset()
+        self._sag_nominal = None
         self.last_command_time = 0.0
         self.last_target = None
         self.last_command_speed = 0
@@ -397,7 +405,8 @@ class Motor12Controller:
         # Motor 제어를 다시 시작할 때는 현재 실제 자세의 Z를
         # 새 기준으로 잡도록 기존 Planner reference를 제거한다.
         if reset_reference and self.planner is not None:
-            self.planner.reference_z_m = None
+            if not self.planner.expanded_workspace:
+                self.planner.reference_z_m = None
             self.planner.cancel_working_pose_recovery()
 
     def _calibration_ranges(self):
@@ -472,7 +481,7 @@ class Motor12Controller:
 
         current_pose = self.planner.kinematics.forward(current)
 
-        if not (
+        if not self.planner.expanded_workspace and not (
             self.planner.working_z_min_m
             <= current_pose.z_m
             <= self.planner.working_z_max_m
@@ -1114,6 +1123,8 @@ class Motor12Controller:
         # Rest mode
         # -----------------------------------------------------
         if self.rest_mode:
+            self.sag.reset('rest')
+            self._sag_nominal = None
             self.last_command_time = 0.0
 
             if self.hold_reason != "REST_ERROR":
@@ -1157,6 +1168,8 @@ class Motor12Controller:
         # SAFE HOLD / Disabled / Hardware not ready
         # -----------------------------------------------------
         if not can_control:
+            self.sag.reset('control_hold')
+            self._sag_nominal = None
             self.last_command_time = 0.0
 
             if (
@@ -1216,14 +1229,18 @@ class Motor12Controller:
         )
 
         try:
-            current = (
-                self._read_current_angles()
-            )
+            read_started = time.monotonic()
+            current = self._read_current_angles()
+            feedback_fresh = time.monotonic()-read_started <= .15
+            if not all(math.isfinite(v) for v in (current.shoulder_lift_deg, current.elbow_flex_deg)):
+                raise ValueError('관절 피드백이 올바르지 않습니다.')
 
             # -------------------------------------------------
             # Explicit Recovery
             # -------------------------------------------------
             if self.planner.recovery_active:
+                self.sag.reset('recovery')
+                self._sag_nominal = None
                 target = self.planner.plan(
                     current=current,
                     user_x_m=self.last_user_x_m,
@@ -1301,6 +1318,8 @@ class Motor12Controller:
             )
 
             if block_reason is not None:
+                self.sag.reset('outside_workspace')
+                self._sag_nominal = None
                 self.last_success = False
                 self.last_recovery_special = False
                 self.hold_reason = block_reason
@@ -1337,6 +1356,35 @@ class Motor12Controller:
                 ),
                 max_x_step_m=self.trajectory_max_x_step_m,
             )
+
+            if self.sag.enabled and self.planner.expanded_workspace:
+                from services.monitor_arm_tracking_path import validate_step
+                if not feedback_fresh:
+                    self.sag.reset('slow_feedback')
+                    self._sag_nominal = None
+                else:
+                    key = (self.last_user_x_m-self.planner.desired_distance_m, self.planner.reference_z_m)
+                    old_key = self.sag.goal_key
+                    if old_key is None or abs(key[0]-old_key[0]) > .003 or abs(key[1]-old_key[1]) > .001:
+                        self._sag_nominal = None
+                    # In the deadband retain the unmodified nominal hold goal.
+                    # Never feed the already compensated command back as a goal.
+                    nominal = target or self._sag_nominal or current
+                    self._sag_nominal = nominal
+                    adjusted = self.sag.apply(nominal, current, key, now, self._calibration_ranges())
+                    try:
+                        validate_step(self.planner.kinematics, current, adjusted,
+                                      self._calibration_ranges(), self.planner.limits)
+                        # Bias is not allowed to cross the working collision envelope.
+                        a = self.planner.kinematics.forward(current)
+                        b = self.planner.kinematics.forward(adjusted)
+                        if not (min(a.z_m, self.planner.working_z_min_m)-.001 <= b.z_m
+                                <= max(a.z_m, self.planner.working_z_max_m)+.001):
+                            raise ValueError('보정 높이 제한')
+                        target = adjusted
+                    except ValueError:
+                        self.sag.reset('path_limit')
+                        self._sag_nominal = None
 
             if target is None:
                 self.last_target = None
@@ -1377,6 +1425,8 @@ class Motor12Controller:
             return self.latest_state
 
         except Exception as error:
+            self.sag.reset('feedback_or_command_error')
+            self._sag_nominal = None
             self.last_success = False
             self.last_error = str(error)
 
@@ -1427,6 +1477,8 @@ class Motor12Controller:
             "trajectory_reference_hz": self.trajectory_reference_hz,
             "trajectory_max_x_step_m": self.trajectory_max_x_step_m,
             "trajectory_speed_error_scale": self.trajectory_speed_error_scale,
+            "sag_compensation": self.sag.snapshot(),
+            "reference_z_m": self.planner.reference_z_m if self.planner else None,
             "pose_speed_mode": self.pose_speed_mode,
             "pose_max_speed": self.pose_max_speed,
             "pose_acc": self.pose_acc,

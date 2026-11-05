@@ -1,3 +1,4 @@
+import os
 """New shell around the original MainWindow and its existing action handlers."""
 import math
 import re
@@ -5,7 +6,7 @@ import time
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QFrame, QHBoxLayout, QVBoxLayout, QGridLayout, QStackedWidget,
-    QSizePolicy, QMessageBox, QDialog, QScrollArea,
+    QSizePolicy, QMessageBox, QDialog, QScrollArea, QProgressBar,
 )
 import mainpyQt as legacy
 from .theme import STYLE, role, label, button, card, close_button
@@ -20,6 +21,8 @@ class MainWindowV3(legacy.MainWindow):
         self._phase = "idle"
         self._raw_status = ""
         self._last_result = {}
+        self._capture_on_main = False
+        self._capture_disabled_widgets = []
         self._combined_capture = {
             "active": False,
             "attempted": False,
@@ -67,6 +70,9 @@ class MainWindowV3(legacy.MainWindow):
         if self._app_closing or self._camera_shutdown_in_progress:
             return False
         try:
+            if (message.get('type') == 'START_MONITOR_ARM_PREPARATION'
+                    and getattr(self, '_new_distance_session', False)):
+                message = {**message, 'reset_distance_reference': True}
             return super().send_hardware_command(message)
         except (ValueError, EOFError, BrokenPipeError) as error:
             print('[POCO IPC] Command unavailable: %s' % error, flush=True)
@@ -139,9 +145,92 @@ class MainWindowV3(legacy.MainWindow):
         if not worker.start_combined_preparation_capture():
             self._combined_capture.update(active=False, failure="통합 기준 저장을 시작하지 못했어요.")
             return False
-        self.set_status("위치와 기준 자세를 함께 저장하고 있어요. 정면을 유지해 주세요.")
+        self.set_status("거리 기준을 맞춘 뒤 자세를 저장하고 있어요. 정면을 유지해 주세요.")
         print('[POCO capture] Started: position + IMU + camera.', flush=True)
         return True
+
+    def _set_main_capture_mode(self, active):
+        if bool(active) == self._capture_on_main:
+            return
+        self._capture_on_main = bool(active)
+        if active:
+            widgets = (self.btnUserProfile, self.btnManualArm, self.settings_button, self.btnReport)
+            self._capture_disabled_widgets = [(widget, widget.isEnabled()) for widget in widgets]
+            for widget, _ in self._capture_disabled_widgets:
+                widget.setEnabled(False)
+        else:
+            for widget, enabled in self._capture_disabled_widgets:
+                widget.setEnabled(enabled)
+            self._capture_disabled_widgets = []
+
+    def show_main_calibration(self, dialog):
+        if dialog is not self.monitor_arm_preparation_dialog:
+            return
+        dialog.hide()
+        self.pages.setCurrentIndex(0)
+        self._set_main_capture_mode(True)
+        self._phase = "capture_ready"
+        self.set_status("카메라에서 얼굴과 어깨를 확인한 뒤 5초 동안 자세 기준을 함께 저장해 주세요.")
+        self._sync_view()
+
+    def _return_to_position(self):
+        dialog = self.monitor_arm_preparation_dialog
+        if (not self._capture_on_main or dialog is None
+                or self._combined_capture.get("active") or dialog._finish_requested):
+            return
+        # A new position needs a new baseline, but keep the camera/preparation
+        # session alive. Do not rerun connection or automatically move to rest.
+        if self._combined_capture.get("attempted"):
+            self.cancel_combined_preparation_capture()
+            self._combined_capture["failure"] = ""
+            self.camera_worker.start_monitor_arm_preparation()
+        self._set_main_capture_mode(False)
+        self._phase = "preparing"
+        dialog._go_step(1)
+        dialog.show()
+        self._sync_view()
+
+    def _sync_main_capture(self):
+        self.coach_state_pages.setCurrentIndex(1 if self._capture_on_main else 0)
+        if not self._capture_on_main:
+            return
+        dialog = self.monitor_arm_preparation_dialog
+        if dialog is None:
+            return
+        dialog.refresh_state()
+        combined = self.combined_preparation_capture_state()
+        if dialog._finish_requested:
+            self._phase = "capture_finishing"
+        elif combined.get("active"):
+            self._phase = "capturing"
+        elif combined.get("ready"):
+            self._phase = "capture_done"
+        elif combined.get("failure"):
+            self._phase = "capture_failed"
+        else:
+            self._phase = "capture_ready"
+        self.main_capture_progress.setValue(dialog.capture_progress.value())
+        self.main_capture_summary.setText(dialog.capture_summary.text())
+        if self._phase == "capture_ready":
+            self.main_capture_summary.setText(
+                "얼굴과 어깨가 보이게 앉아 주세요.\n버튼을 누르면 자세 기준을 함께 저장해요."
+                if combined.get("camera_ready") else "카메라와 AI를 준비하고 있어요. 잠시 기다려 주세요."
+            )
+        elif self._phase == "capturing":
+            remaining = max(0, math.ceil(5.0 - (time.monotonic() - combined["started_at"])))
+            posture_ready = combined.get("imu_success") and combined.get("pose_success")
+            self.main_capture_summary.setText(
+                "눈 간격 %s  ·  자세 %s\n%s" % (
+                    "완료" if combined.get("sensor_ready") else "측정 중",
+                    "완료" if posture_ready else "측정 중",
+                    "약 %d초 동안 지금 자세를 유지해 주세요." % remaining
+                    if remaining else "측정 결과를 확인하고 있어요. 잠시 기다려 주세요.",
+                )
+            )
+        elif self._phase == "capture_done":
+            self.main_capture_summary.setText(
+                "위치와 자세 기준을 모두 저장했어요.\n‘저장 완료 · 계속’을 누르면 코칭을 준비해요."
+            )
 
     def cancel_combined_preparation_capture(self):
         worker = self.camera_worker
@@ -188,14 +277,14 @@ class MainWindowV3(legacy.MainWindow):
         state = self.combined_preparation_capture_state()
         if state["ready"]:
             self._combined_capture["active"] = False
-            self.set_status("위치·IMU·카메라 기준을 모두 저장했어요. ‘기준 저장 완료 · 계속’을 눌러 주세요.")
+            self.set_status("눈 간격·IMU·카메라 기준을 모두 저장했어요. ‘기준 저장 완료 · 계속’을 눌러 주세요.")
             print('[POCO capture] All baselines ready; Continue enabled.', flush=True)
             return
         started = self._combined_capture.get("started_at")
         if started is not None and time.monotonic() - started >= COMBINED_CAPTURE_TIMEOUT_SEC:
             pending = []
             if not state["sensor_ready"]:
-                pending.append("위치(ToF·눈 간격)")
+                pending.append("눈 간격")
             if not state.get("imu_success"):
                 pending.append("IMU")
             if not state.get("pose_success"):
@@ -234,6 +323,7 @@ class MainWindowV3(legacy.MainWindow):
         mark.setStyleSheet("background:#3182F6;color:white;border-radius:12px;font-size:27px;font-weight:700;")
         header.addWidget(mark)
         header.addWidget(label("POCO", "title"))
+        header.addWidget(label("v4 · 관절 처짐 보정" if os.environ.get("POCO_CONTROL_VARIANT") == "v4" else "v3", "muted"))
         header.addSpacing(5)
         header.addWidget(label("자세 코칭", "muted"))
         header.addStretch(1)
@@ -325,6 +415,12 @@ class MainWindowV3(legacy.MainWindow):
         preview_layout.addWidget(self.label, 1)
         right.addWidget(preview, 1)
         state, state_layout = card(14)
+        self.coach_state_pages = QStackedWidget()
+        state_layout.addWidget(self.coach_state_pages)
+        normal_state = QWidget()
+        self.coach_state_pages.addWidget(normal_state)
+        state_layout = QVBoxLayout(normal_state)
+        state_layout.setContentsMargins(0, 0, 0, 0)
         state_layout.setSpacing(4)
         top = QHBoxLayout()
         self.coach_caption = label("오늘도 편안한 자세로", "muted")
@@ -343,6 +439,25 @@ class MainWindowV3(legacy.MainWindow):
         state_layout.addWidget(self.label_CurrentPose)
         self.coach_detail = label("얼굴과 어깨가 카메라 안에 보이도록 앉아 주세요.", "muted", True)
         state_layout.addWidget(self.coach_detail)
+        capture_state = QWidget()
+        capture_layout = QVBoxLayout(capture_state)
+        capture_layout.setContentsMargins(0, 0, 0, 0)
+        capture_layout.setSpacing(7)
+        capture_layout.addWidget(label("자세 기준 저장", "section"))
+        self.main_capture_progress = QProgressBar()
+        self.main_capture_progress.setRange(0, 100)
+        self.main_capture_progress.setTextVisible(False)
+        self.main_capture_progress.setFixedHeight(8)
+        self.main_capture_progress.setStyleSheet(
+            "QProgressBar{border:0;border-radius:4px;background:#E8EDF3;min-height:8px;max-height:8px;}"
+            "QProgressBar::chunk{background:#3182F6;border-radius:4px;}"
+        )
+        self.main_capture_progress.setValue(0)
+        capture_layout.addWidget(self.main_capture_progress)
+        self.main_capture_summary = label("카메라에서 내 모습을 확인해 주세요.", "muted", True)
+        self.main_capture_summary.setMinimumHeight(36)
+        capture_layout.addWidget(self.main_capture_summary)
+        self.coach_state_pages.addWidget(capture_state)
         right.addWidget(state)
         row.addLayout(right, 1)
         return page
@@ -428,6 +543,16 @@ class MainWindowV3(legacy.MainWindow):
         }.get(self._phase)
 
     def _run_action(self):
+        if self._capture_on_main:
+            dialog = self.monitor_arm_preparation_dialog
+            if dialog is None:
+                return
+            if self._phase in ("capture_ready", "capture_failed") and dialog.capture_button.isEnabled():
+                dialog.capture_button.click()
+            elif self._phase == "capture_done" and dialog.finish_button.isEnabled():
+                dialog.finish_button.click()
+            self._sync_view()
+            return
         if self._phase == "preparing":
             dialog = self.monitor_arm_preparation_dialog
             if dialog is not None:
@@ -438,6 +563,9 @@ class MainWindowV3(legacy.MainWindow):
             target.click()
 
     def _run_secondary(self):
+        if self._capture_on_main:
+            self._return_to_position()
+            return
         target = self.btnCalibration if self._phase in ("ready", "finished") else self.btnCamOff
         if target.isEnabled():
             target.click()
@@ -446,17 +574,23 @@ class MainWindowV3(legacy.MainWindow):
         if not self._ui_ready:
             return
         self._update_combined_capture_completion()
+        self._sync_main_capture()
         states = {
             "idle": (0, "나에게 맞추고,\n편하게 시작해요", "화면 위치와 기준 자세를\n한 번에 저장해요.", "화면 준비 시작"),
-            "preparing": (0, "시작을\n준비하고 있어요", "연결 확인 후 위치와 기준 자세를 함께 저장해요.", "준비 상태 보기"),
+            "preparing": (0, "시작을\n준비하고 있어요", "연결 확인 후 거리 기준을 맞춘 뒤 자세를 저장해요.", "준비 상태 보기"),
             "baseline_ready": (1, "내 기준 자세를\n기억할게요", "위치와 기준 자세를 모두 저장했어요.", "자세 코칭 시작"),
-            "calibrating": (1, "위치와 자세를\n함께 기록하고 있어요", "정면을 바라보고 저장이 끝날 때까지 자세를 유지해 주세요.", "기준 저장 중…"),
+            "calibrating": (1, "자세 기준을\n기록하고 있어요", "정면을 바라보고 저장이 끝날 때까지 자세를 유지해 주세요.", "기준 저장 중…"),
             "ready": (2, "준비됐어요!\n코칭을 시작해요", "내 기준 자세로 움직임을 살펴보고 자세 변화를 알려드려요.", "자세 코칭 시작"),
             "starting": (2, "코칭을\n준비하고 있어요", "저장한 기준값과 장치 상태를 확인하고 있어요.", "코칭 준비 중…"),
             "measuring": (2, "조금씩 더\n편안한 자세로", "현재 자세와 모니터 움직임을 확인해 주세요.", "측정 끝내기"),
             "stopping": (2, "측정을 마치고\n화면을 정리해요", "모니터암이 휴식 자세로 이동하고 있어요.", "종료 처리 중…"),
             "finished": (2, "수고했어요!\n기록을 확인해요", "상세 기록에서 자세 변화를 살펴볼 수 있어요.", "측정 기록 보기"),
             "profile_loading": (0, "내 설정으로\n화면을 맞춰요", "연결 확인 후 저장된 작업 위치로 모니터암이 이동해요.", "내 설정 적용 중…"),
+            "capture_ready": (1, "화면을 보며\n기준을 맞춰요", "정면을 바라보고 편하게 앉아 주세요. 5초 동안 지금 자세를 기억해요.", "5초 자세 기준 저장"),
+            "capturing": (1, "지금 자세를\n유지해 주세요", "카메라를 보며 저장이 끝날 때까지 지금 자세를 유지해 주세요.", "자세 기준 저장 중…"),
+            "capture_done": (1, "기준을 모두\n저장했어요", "위치와 자세 기준이 준비됐어요. 계속 버튼을 눌러 코칭으로 넘어가세요.", "저장 완료 · 계속"),
+            "capture_failed": (1, "기준 저장을\n다시 시도해요", "아래 안내를 확인하고 정면을 바라본 뒤 다시 저장해 주세요.", "다시 5초 기준 저장"),
+            "capture_finishing": (1, "저장을 마치고\n코칭을 준비해요", "저장 결과를 확인하고 있어요. 잠시 기다려 주세요.", "완료 확인 중…"),
         }
         step, title, description, action = states.get(self._phase, states["idle"])
         self.phase_title.setText(title)
@@ -464,6 +598,12 @@ class MainWindowV3(legacy.MainWindow):
         self.action_button.setText(action)
         target = self._action()
         self.action_button.setEnabled(bool(target and target.isEnabled()) or self._phase == "preparing")
+        if self._capture_on_main:
+            dialog = self.monitor_arm_preparation_dialog
+            self.action_button.setEnabled(bool(dialog and (
+                (self._phase in ("capture_ready", "capture_failed") and dialog.capture_button.isEnabled())
+                or (self._phase == "capture_done" and dialog.finish_button.isEnabled())
+            )))
         desired_role = "danger" if self._phase == "measuring" else "primary"
         if self.action_button.property("role") != desired_role:
             role(self.action_button, desired_role)
@@ -474,6 +614,10 @@ class MainWindowV3(legacy.MainWindow):
         self.secondary_action.setVisible(restart or cancellable)
         self.secondary_action.setText("다시 준비하기" if restart else "준비 종료 · 화면 정리")
         self.secondary_action.setEnabled((self.btnCalibration if restart else self.btnCamOff).isEnabled())
+        if self._capture_on_main:
+            self.secondary_action.setVisible(True)
+            self.secondary_action.setText("화면 위치 다시 조절")
+            self.secondary_action.setEnabled(self._phase not in ("capturing", "capture_finishing"))
         for idx, item in enumerate(self.step_labels):
             item.setStyleSheet("color:%s;font-size:11px;font-weight:%s;" % (
                 "#3182F6" if idx == step else "#8B95A1", "700" if idx == step else "400"))
@@ -527,7 +671,12 @@ class MainWindowV3(legacy.MainWindow):
         )
 
     def on_calibration_clicked(self):
-        super().on_calibration_clicked()
+        self._set_main_capture_mode(False)
+        self._new_distance_session = True
+        try:
+            super().on_calibration_clicked()
+        finally:
+            self._new_distance_session = False
         self._phase = "preparing"
         self._sync_view()
 
@@ -596,6 +745,11 @@ class MainWindowV3(legacy.MainWindow):
 
     def on_hardware_event_changed(self, event):
         super().on_hardware_event_changed(event)
+        # The legacy window forwards only to visible dialogs. Our preparation
+        # controller stays alive while its calibration UI is on the main page.
+        dialog = self.monitor_arm_preparation_dialog
+        if self._capture_on_main and dialog is not None and not dialog.isVisible():
+            dialog.handle_hardware_event(event)
         if isinstance(event, dict):
             event_type = str(event.get("type", "")).upper()
             active = self._combined_capture.get("active", False)
@@ -627,6 +781,7 @@ class MainWindowV3(legacy.MainWindow):
             and self._combined_capture.get("attempted")
             and self.combined_preparation_capture_state().get("ready", False)
         )
+        self._set_main_capture_mode(False)
         super().on_monitor_arm_preparation_finished(success, message)
         self._combined_capture.update(active=False, attempted=False)
         self.btnCalibrationStart.setEnabled(False)
@@ -664,6 +819,8 @@ class MainWindowV3(legacy.MainWindow):
         self.label_CurrentPose.setToolTip("모델 판단 신뢰도: %.1f%% (자세 점수가 아닙니다)" % (float(result.get("confidence", 0)) * 100))
 
     def closeEvent(self, event):
+        if self._capture_on_main and self.monitor_arm_preparation_dialog is not None:
+            self.monitor_arm_preparation_dialog.cancel_preparation()
         if hasattr(self, "_view_timer"):
             self._view_timer.stop()
         # This is exactly the original orderly CameraWorker/process shutdown.

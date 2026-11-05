@@ -18,20 +18,22 @@ def other_poco_processes():
             if not args or 'python' not in Path(args[0]).name.lower():
                 continue
             for value in args[1:]:
-                if Path(value).name not in ('mainpyQt.py', 'mainpyQt_v2.py', 'mainpyQt_v3.py'):
+                if Path(value).name not in ('mainpyQt.py', 'mainpyQt_v2.py', 'mainpyQt_v3.py', 'mainpyQt_v4.py', 'mainpyQt_v5.py', 'mainpyQt_v6.py'):
                     continue
                 path = Path(value)
                 if not path.is_absolute():
                     path = (proc/'cwd').resolve() / path
-                if path.resolve().parent == app_dir:
-                    found.append(int(proc.name))
+                # The original and rollback copies share the same motor bus.
+                found.append(int(proc.name))
         except (OSError, PermissionError):
             continue
     return found
 
 
-def main():
-    parser = argparse.ArgumentParser(description='POCO UI v3')
+def main(variant="v3"):
+    os.environ["POCO_CONTROL_VARIANT"] = {"v5": "v3", "v6": "v4"}.get(variant, variant)
+    os.environ["POCO_APP_VARIANT"] = variant
+    parser = argparse.ArgumentParser(description='POCO UI '+variant)
     parser.add_argument('--windowed', action='store_true')
     parser.add_argument('--autostart', action='store_true',
                         help='Prepare the saved rest pose before any profile selection')
@@ -56,7 +58,7 @@ def main():
         if args.autostart:
             print('[POCO startup] Another POCO app is running: %s' % peers, flush=True)
             return 2
-        QMessageBox.information(None, 'POCO가 실행 중이에요', '기존 POCO 창을 정상 종료한 뒤 UI v3를 실행해 주세요.\n두 버전은 동시에 사용할 수 없어요.')
+        QMessageBox.information(None, 'POCO가 실행 중이에요', '기존 POCO 창을 정상 종료한 뒤 새 버전을 실행해 주세요.\n두 버전은 동시에 사용할 수 없어요.')
         return 2
     import mainpyQt as legacy
     from ui_v3.dialogs import PreparationDialogV3, ProfileDialogV3
@@ -68,6 +70,7 @@ def main():
     from ui_v3.window import MainWindowV3
     print('[POCO startup] mode=%s' % ('boot: connect and rest' if args.autostart else 'manual'), flush=True)
     window = MainWindowV3(autostart=args.autostart)
+    window.setWindowTitle('POCO · UI '+variant)
     window.show() if args.windowed else window.showFullScreen()
     return app.exec_()
 

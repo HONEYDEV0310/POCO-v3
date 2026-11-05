@@ -53,8 +53,11 @@ Hardware Process가 반복적으로 update()를 호출하면
 """
 
 import glob
+import json
+import os
 import re
 import time
+from pathlib import Path
 from collections import deque
 
 from services.hardware_constants import (
@@ -249,6 +252,62 @@ class BuzzerService:
         # 임의로 버리지 않도록 같은 순서로 보관한다.
         self._pending_patterns = deque()
 
+        # Diagnostic events stay in memory during a beep; write only once silent.
+        self._diag_enabled = os.environ.get("POCO_BUZZER_DIAGNOSTICS", "1") != "0"
+        self._diag_events = deque(maxlen=128)
+        self._diag_last_update = None
+        self._diag_max_update_gap_ms = 0.0
+        self._diag_max_loop_age_ms = 0.0
+        self._diag_max_deadline_late_ms = 0.0
+
+    def _diag_record(self, event, **fields):
+        if not self._diag_enabled:
+            return
+        try:
+            self._diag_events.append({
+                "event": event,
+                "wall_time_ns": time.time_ns(),
+                "monotonic_ns": time.monotonic_ns(),
+                "pid": os.getpid(),
+                "pin": self.pin,
+                "frequency_hz": self.frequency_hz,
+                "duty_cycle": self.duty_cycle,
+                "phase": self._phase,
+                "command": self._active_command,
+                "pending": len(self._pending_patterns),
+                **fields,
+            })
+        except Exception:
+            pass  # Diagnostics must not prevent an alarm or cleanup.
+
+    def _diag_flush(self):
+        if not self._diag_events:
+            return
+        try:
+            path = Path(os.environ.get(
+                "POCO_BUZZER_LOG",
+                str(Path.home() / ".local/state/poco/buzzer-diagnostic.jsonl"),
+            ))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > 1024 * 1024:
+                path.replace(path.with_suffix(path.suffix + ".1"))
+            with path.open("a", encoding="utf-8") as log:
+                for event in self._diag_events:
+                    log.write(json.dumps(event, ensure_ascii=False) + "\n")
+            self._diag_events.clear()
+        except Exception:
+            self._diag_events.clear()
+
+    def _diag_summary(self, event):
+        self._diag_record(
+            event,
+            max_update_gap_ms=round(self._diag_max_update_gap_ms, 3),
+            max_loop_age_ms=round(self._diag_max_loop_age_ms, 3),
+            max_deadline_late_ms=round(self._diag_max_deadline_late_ms, 3),
+            last_error=self.last_error,
+        )
+        self._diag_flush()
+
     # ========================================================
     # Hardware Open
     # ========================================================
@@ -289,6 +348,8 @@ class BuzzerService:
             self._phase = "IDLE"
             self._output_on = False
 
+            self._diag_record("opened", gpiochip=chip, gpiochip_label=label)
+            self._diag_flush()
             print(
                 "[BuzzerService] 준비 완료 "
                 f"(gpiochip{chip}:{label}, BCM{self.pin}, "
@@ -408,6 +469,8 @@ class BuzzerService:
 
         # 발생 순서를 유지한다.
         self._pending_patterns.append(pattern)
+        self._diag_record("queued", requested_command=command,
+                          requested_repeats=pattern["repeat_count"])
 
         # 현재 아무 Pattern도 실행 중이지 않으면 즉시 시작한다.
         if self._phase == "IDLE":
@@ -434,6 +497,23 @@ class BuzzerService:
 
         if now is None:
             now = time.monotonic()
+
+        if self._diag_enabled and self._phase != "IDLE":
+            observed = time.monotonic()
+            if self._diag_last_update is not None:
+                self._diag_max_update_gap_ms = max(
+                    self._diag_max_update_gap_ms,
+                    (observed - self._diag_last_update) * 1000.0,
+                )
+            self._diag_last_update = observed
+            self._diag_max_loop_age_ms = max(
+                self._diag_max_loop_age_ms, (observed - now) * 1000.0,
+            )
+            if now >= self._phase_deadline:
+                self._diag_max_deadline_late_ms = max(
+                    self._diag_max_deadline_late_ms,
+                    (observed - self._phase_deadline) * 1000.0,
+                )
 
         # Pattern이 끝났지만 Pending Pattern이 남아 있다면
         # 다음 Pattern을 시작한다.
@@ -531,6 +611,13 @@ class BuzzerService:
             pattern["off_sec"]
         )
 
+        self._diag_last_update = time.monotonic()
+        self._diag_max_update_gap_ms = 0.0
+        self._diag_max_loop_age_ms = 0.0
+        self._diag_max_deadline_late_ms = 0.0
+        self._diag_record("pattern_start", repeats=self._remaining_count,
+                          on_sec=self._on_sec, off_sec=self._off_sec)
+
         try:
             # Pattern은 항상 ON부터 시작한다.
             self._set_output(True)
@@ -571,6 +658,7 @@ class BuzzerService:
 
         self._set_output(False)
 
+        self._diag_summary("pattern_complete")
         print(
             "[BuzzerService] Alert 완료 "
             f"command={self._active_command}"
@@ -607,15 +695,28 @@ class BuzzerService:
         if self._device is None:
             return
 
-        if enabled:
-            self._device.value = (
-                self.duty_cycle
-            )
-            self._output_on = True
+        started = time.monotonic_ns()
+        error_text = None
+        try:
+            if enabled:
+                self._device.value = (
+                    self.duty_cycle
+                )
+                self._output_on = True
 
-        else:
-            self._device.value = 0.0
-            self._output_on = False
+            else:
+                self._device.value = 0.0
+                self._output_on = False
+        except Exception as error:
+            error_text = str(error)
+            raise
+        finally:
+            self._diag_record(
+                "output", enabled=bool(enabled),
+                call_started_monotonic_ns=started,
+                pwm_call_ms=round((time.monotonic_ns() - started) / 1e6, 3),
+                error=error_text,
+            )
 
     # ========================================================
     # Stop / Close
@@ -635,6 +736,7 @@ class BuzzerService:
         except Exception:
             pass
 
+        self._diag_summary("stopped")
         self._output_on = False
 
         self._phase = "IDLE"

@@ -20,7 +20,8 @@ class CameraWorkerV3(CameraWorker):
             return False
 
         if not self.vision_manager.send_hardware_command({
-            "type": "START_MONITOR_ARM_COMBINED_CAPTURE"
+            "type": "START_MONITOR_ARM_COMBINED_CAPTURE",
+            "reuse_distance_reference": True
         }):
             self.status_changed.emit("통합 기준 저장을 시작하지 못했어요.")
             return False
@@ -29,7 +30,7 @@ class CameraWorkerV3(CameraWorker):
         self.vision_manager.start_calibration()
         self.mode = RunMode.CALIBRATING
         self.status_changed.emit(
-            "ToF 위치 기준, IMU 기준, 카메라 자세 기준을 함께 측정하고 있어요."
+            "눈 간격, IMU 기준, 카메라 자세 기준을 함께 측정하고 있어요."
         )
         return True
 

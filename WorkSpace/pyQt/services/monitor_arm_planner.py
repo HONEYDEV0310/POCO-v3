@@ -43,6 +43,8 @@ class MonitorArmPlanner:
             raise ValueError(
                 "control.pose_joint_command_mode는 direct 또는 stepped여야 합니다."
             )
+        self.expanded_workspace = False
+        self.height_deadband_m = .002
         self.reference_z_m: float | None = None
         cartesian = settings.get("manual_cartesian", {})
         self.working_z_min_m = float(cartesian.get("monitor_z_min_m", 0.20))
@@ -246,6 +248,15 @@ class MonitorArmPlanner:
 
         if self.recovery_active:
             return self._plan_working_pose_recovery(current, calibration_ranges)
+
+        if self.expanded_workspace:
+            from services.monitor_arm_tracking_path import tracking_step
+            return tracking_step(
+                self.kinematics, current, float(user_x_m)-self.desired_distance_m,
+                self.reference_z_m, self._effective_joint_ranges(calibration_ranges),
+                self.limits, self.working_z_min_m, self.working_z_max_m,
+                step=min(self.max_x_step_m, max_x_step_m or self.max_x_step_m),
+                x_deadband=self.deadband_m, z_deadband=self.height_deadband_m)
 
         current_pose = self.kinematics.forward(current)
         requested_pose = monitor_target_from_user(

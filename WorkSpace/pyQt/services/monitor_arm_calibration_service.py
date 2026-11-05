@@ -57,6 +57,7 @@ class MonitorArmPreparationCalibrationService:
         self._last_tof_timestamp: float | None = None
         self._last_pose_frame_id: int | None = None
         self.record = self._empty_record()
+        self.distance_reference = None
 
     def _empty_record(self) -> dict[str, Any]:
         return {
@@ -79,7 +80,8 @@ class MonitorArmPreparationCalibrationService:
             "last_error": None,
         }
 
-    def start(self) -> dict[str, Any]:
+    def start(self, distance_reference=None) -> dict[str, Any]:
+        self.distance_reference = dict(distance_reference) if distance_reference else None
         self.running = True
         self.session_ready = False
         self.started_at = time.monotonic()
@@ -131,7 +133,7 @@ class MonitorArmPreparationCalibrationService:
         return self.snapshot()
 
     def add_tof_state(self, tof_state: dict[str, Any] | None) -> bool:
-        if not self.running or not isinstance(tof_state, dict):
+        if self.distance_reference or not self.running or not isinstance(tof_state, dict):
             return False
         if not tof_state.get("valid", False):
             return False
@@ -196,6 +198,9 @@ class MonitorArmPreparationCalibrationService:
         eye_count = len(self.eye_gap_samples_px)
         tof_avg = fmean(self.tof_samples_m) if self.tof_samples_m else None
         eye_avg = fmean(self.eye_gap_samples_px) if self.eye_gap_samples_px else None
+        if self.distance_reference:
+            tof_avg = self.distance_reference['tof_user_x_baseline_m']
+            tof_count = int(self.distance_reference['tof_sample_count'])
         success = bool(
             tof_avg is not None
             and eye_avg is not None
@@ -247,6 +252,9 @@ class MonitorArmPreparationCalibrationService:
                 ),
                 "motor_angles_deg": dict(metadata.get("motor_angles_deg") or {}),
             })
+        if success and self.distance_reference:
+            self.record['distance_setup'] = dict(self.distance_reference)
+            self.record['tof_range_baseline_m'] = self.distance_reference['tof_range_baseline_m']
         if success:
             self._save_record(self.record)
         return self.snapshot()

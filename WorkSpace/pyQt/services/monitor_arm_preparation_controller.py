@@ -137,6 +137,8 @@ class MonitorArmPreparationController:
         )
 
     def begin(self) -> None:
+        self._cartesian_queue = []
+        self._cartesian_goal = None
         self.active = True
         self.last_error = None
         self.movement_status = "idle"
@@ -147,6 +149,8 @@ class MonitorArmPreparationController:
         self.motor12_last_error = None
 
     def end(self) -> None:
+        self._cartesian_queue = []
+        self._cartesian_goal = None
         self.active = False
         self.recovery_active = False
         self.target_reason = None
@@ -283,6 +287,8 @@ class MonitorArmPreparationController:
             self.movement_status = "telemetry_error"
 
     def request_working_start(self) -> JointCommand:
+        self._cartesian_queue = []
+        self._cartesian_goal = None
         self._require_connected()
         cartesian = self.settings.get("manual_cartesian", {})
         distance = float(
@@ -348,6 +354,8 @@ class MonitorArmPreparationController:
         return target
 
     def request_rest(self) -> dict[str, Any]:
+        self._cartesian_queue = []
+        self._cartesian_goal = None
         """모터 1~4를 저장된 휴식 자세로 이동한다."""
         self._require_connected()
         result = self.motor12.move_to_rest()
@@ -368,6 +376,80 @@ class MonitorArmPreparationController:
         self.movement_status = "moving"
         self.working_start_max_error_deg = None
         return {**result, "gimbal": gimbal_result}
+
+    def command_distance_target(self, user_x_m, distance_m, height_m):
+        from services.monitor_arm_distance_setup import calibrated_limits
+        from services.monitor_arm_tracking_path import tracking_path
+        self._require_connected()
+        if not self.active or not self.working_start_completed or self.snapshot()['movement_active']:
+            raise ValueError('작업 시작 위치에 도착한 뒤 조절해 주세요.')
+        planner = self.motor12.planner
+        height_m = float(height_m)
+        if not planner.working_z_min_m <= height_m <= planner.working_z_max_m:
+            raise ValueError('설정 가능한 화면 높이 범위를 벗어났습니다.')
+        pose = monitor_target_from_user(float(user_x_m), float(distance_m), height_m)
+        self.refresh_telemetry(force=True)
+        if self.movement_status == 'telemetry_error' or self.current is None:
+            raise ValueError('현재 관절 위치를 읽지 못했습니다.')
+        ranges = self._motor12_ranges()
+        limits = calibrated_limits(planner.limits, ranges)
+        path = tracking_path(self.kinematics, self.current, pose, ranges, limits,
+                             planner.working_z_min_m, planner.working_z_max_m)
+        planner.limits = limits
+        planner.expanded_workspace = True
+        planner.desired_distance_m = float(distance_m)
+        planner.reference_z_m = height_m
+        planner.cancel_working_pose_recovery()
+        self._cartesian_queue = path
+        self._cartesian_timeout_sec = max(self.movement_timeout_sec, len(path)*.4+5)
+        self._cartesian_goal = None
+        self._cartesian_last_tick = 0.0
+        self.target = path[-1]
+        self.target_pose = pose
+        self.target_reason = 'manual_cartesian'
+        self.movement_status = 'moving'
+        self.movement_started_at = time.monotonic()
+        self.arrival_stable_sample_count = 0
+        self.last_error = None
+        self.motor12.rest_mode = False
+        return self.target
+
+    def _advance_cartesian(self, now):
+        if self.target_reason != 'manual_cartesian':
+            return
+        try:
+            if not self.active or self.movement_status == 'telemetry_error' or self.current is None:
+                raise ValueError('현재 위치 확인이 끊겨 이동을 중단했습니다.')
+            if now - self.movement_started_at > getattr(self, '_cartesian_timeout_sec', self.movement_timeout_sec):
+                raise ValueError('이동 시간이 초과됐어요. 걸림 여부를 확인해 주세요.')
+            # Advance only on fresh servo telemetry, never twice on one sample.
+            if self.last_telemetry_at <= self._cartesian_last_tick:
+                return
+            self._cartesian_last_tick = self.last_telemetry_at
+            goal = self._cartesian_goal
+            if goal is not None and self._largest_delta(self.current, goal) > 1.0:
+                return
+            if not self._cartesian_queue:
+                self.arrival_stable_sample_count += 1
+                if self.arrival_stable_sample_count >= self.arrival_stable_samples:
+                    self.target_reason = None
+                    self.movement_started_at = None
+                    self.movement_status = 'completed'
+                return
+            target = self._cartesian_queue[0]
+            from services.monitor_arm_tracking_path import validate_step
+            validate_step(self.kinematics, self.current, target,
+                          self._motor12_ranges(), self.motor12.planner.limits)
+            if not self.motor.move_joints(
+                    {'shoulder_lift': target.shoulder_lift_deg, 'elbow_flex': target.elbow_flex_deg},
+                    speed=min(200, self.motor12.pose_max_speed or 200), acc=10, wait=False):
+                raise ValueError(self.motor.last_error or '모터 명령 전송 실패')
+            self._cartesian_queue.pop(0)
+            self._cartesian_goal = target
+        except Exception as error:
+            self._cartesian_queue = []
+            self._cartesian_goal = None
+            self.record_movement_error(str(error), 'command_error')
 
     def command_manual_ik(
         self,
@@ -470,6 +552,7 @@ class MonitorArmPreparationController:
         if self.connected:
             self.refresh_telemetry()
 
+        self._advance_cartesian(time.monotonic() if now is None else now)
         planner = getattr(self.motor12, "planner", None)
         self.motor12_hold_reason = getattr(self.motor12, "hold_reason", None)
         live_motor12_error = getattr(self.motor12, "last_error", None)

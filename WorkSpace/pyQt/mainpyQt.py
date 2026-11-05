@@ -258,8 +258,10 @@ class MainWindow(QMainWindow):
         self.update_sensor_monitor(state)
         safety = state.get("monitor_arm", {}).get("safety", {}) if isinstance(state, dict) else {}
         if str(state.get("main_mode", "")).upper() == "MEASURING" and safety:
+            automatic_return = safety.get("automatic_return", {})
             message = (
-                safety.get("tof_alert")
+                (automatic_return.get("reason") if automatic_return.get("blocks_tracking") else None)
+                or safety.get("tof_alert")
                 or safety.get("landmark_alert")
                 or safety.get("reason")
             )
@@ -373,6 +375,15 @@ class MainWindow(QMainWindow):
                 self._pending_profile_slot = None
             elif event_type == "USER_PROFILE_APPLY_STARTED":
                 self.set_status(str(event.get("message", "작업 초기위치로 이동하고 있습니다.")))
+            elif event_type.startswith("MONITOR_ARM_AUTOMATIC_RETURN_"):
+                self.set_status(str(event.get("message", "")))
+                if event_type == "MONITOR_ARM_AUTOMATIC_RETURN_FAILED":
+                    answer = QMessageBox.warning(
+                        self, "자동 복귀 확인", str(event.get("message", "")),
+                        QMessageBox.Retry | QMessageBox.Close, QMessageBox.Close,
+                    )
+                    if answer == QMessageBox.Retry:
+                        self.send_hardware_command({"type": "MONITOR_ARM_AUTOMATIC_RETURN_RETRY"})
             elif event_type == "MEASUREMENT_STOP_AND_REST_ACK" and self._measurement_stop_pending:
                 if event.get("success") is False:
                     QMessageBox.warning(self, "종료 자세 이동", str(event.get("message", "")))
