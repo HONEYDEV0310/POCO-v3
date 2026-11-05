@@ -1,0 +1,419 @@
+{
+    "saved_at": "2026-10-29T08:24:52.837262+00:00",
+    "device": "/dev/ttyACM0",
+    "baudrate": 1000000,
+    "servos": {
+        "1": {
+            "servo_id": 1,
+            "joint": "shoulder_lift",
+            "direction": 1,
+            "raw_position_increase_motion": "팔 끝단이 아래 방향으로 이동",
+            "raw_position_decrease_motion": "팔 끝단이 위 방향으로 이동",
+            "direction_reference": "로봇 정면/측면에서 shoulder_lift 움직임 기준",
+            "zero_position": 2206,
+            "urdf_min_angle_rad": -1.74533,
+            "urdf_max_angle_rad": 1.74533,
+            "position_at_urdf_min_angle": 1068,
+            "position_at_urdf_max_angle": 3344,
+            "safe_position_at_min_angle": 1128,
+            "safe_position_at_max_angle": 3187,
+            "max_speed": 1000,
+            "calibration_status": "low_speed_functional_verified_precision_and_payload_validation_pending",
+            "vertical_reference": {
+                "encoder_position": 2047,
+                "world_angle_deg": 90,
+                "code_zero_world_angle_deg": 76.03203992017384,
+                "encoder_offset_register_raw": 3982,
+                "direction_verified": true,
+                "captured_at": "2026-10-29T05:42:30.853802+00:00",
+                "method": "user_aligned_vertical_then_hardware_midpoint_calibration"
+            },
+            "direction_verification": {
+                "method": "user_manually_tilted_motor1_toward_monitor_with_torque_off",
+                "vertical_position": 2047,
+                "forward_position": 2266,
+                "raw_delta": 219,
+                "encoder_angle_delta_deg": 19.248046875,
+                "captured_at": "2026-10-29T06:10:29.412728+00:00",
+                "position_samples": 10,
+                "sample_spread_ticks": 0
+            },
+            "operating_limit_measurements": {
+                "front": {
+                    "captured_at": "2026-10-29T06:23:18.024637+00:00",
+                    "position_samples": [
+                        3222,
+                        3222,
+                        3222,
+                        3222,
+                        3222,
+                        3222,
+                        3222,
+                        3222,
+                        3222,
+                        3222
+                    ],
+                    "raw_position": 3222
+                },
+                "rear": {
+                    "captured_at": "2026-10-29T06:26:03.031967+00:00",
+                    "position_samples": [
+                        850,
+                        850,
+                        850,
+                        850,
+                        850,
+                        850,
+                        850,
+                        850,
+                        850,
+                        850
+                    ],
+                    "raw_position": 850
+                },
+                "inward_margin_ticks": 35,
+                "inward_margin_deg": 3.076171875,
+                "measured_range_with_margin": [
+                    885,
+                    3187
+                ],
+                "previous_general_range_translated_to_new_zero": [
+                    1128,
+                    3264
+                ],
+                "applied_general_range": [
+                    1128,
+                    3187
+                ],
+                "selection": "intersection of measured range with margin, prior general range and nominal URDF range",
+                "scope": "manually supported motor1; other-joint poses, powered movement and payload not yet validated"
+            },
+            "powered_test": {
+                "captured_at": "2026-10-29T08:17:37.763052+00:00",
+                "audit": "/tmp/poco-functional-small-jog-20261029T081737Z.json",
+                "success": true,
+                "command_delta_ticks": 20,
+                "command_delta_deg": 1.7578125,
+                "speed_raw": 20,
+                "acceleration_raw": 1,
+                "ram_output_limit_raw": 300,
+                "settling_tolerance_ticks": 8,
+                "max_settled_error_ticks": 7,
+                "actual_bidirectional_motion_verified": true,
+                "strict_3_tick_return_test_failed_on_motor1": true,
+                "support_present": true,
+                "unsupported_payload_validated": false,
+                "full_workspace_collision_validated": false,
+                "configured_max_speed_1000_validated": false
+            }
+        },
+        "2": {
+            "servo_id": 2,
+            "joint": "elbow_flex",
+            "direction": 1,
+            "raw_position_increase_motion": "팔꿈치 이후 링크와 끝단이 아래 방향으로 이동",
+            "raw_position_decrease_motion": "팔꿈치 이후 링크와 끝단이 위 방향으로 이동",
+            "direction_reference": "elbow_flex 관절 이후 링크 움직임 기준",
+            "zero_position": 1815,
+            "urdf_min_angle_rad": -1.69,
+            "urdf_max_angle_rad": 1.69,
+            "position_at_urdf_min_angle": 713,
+            "position_at_urdf_max_angle": 2917,
+            "safe_position_at_min_angle": 805,
+            "safe_position_at_max_angle": 2831,
+            "max_speed": 1000,
+            "calibration_status": "low_speed_functional_verified_precision_and_payload_validation_pending",
+            "replacement_model": "STS3250",
+            "persistent_id_verified": 2,
+            "replacement_confirmed_by_user": true,
+            "reference_measurement": {
+                "quality": "approximate_user_alignment_not_precision_calibration",
+                "lower_link_world_angle_deg_assumed": 0,
+                "alignment_uncertainty_deg": null,
+                "motor1_raw": 1999,
+                "motor1_team_deg": 18.193359375,
+                "motor2_raw_before_midpoint": 334,
+                "motor2_raw_after_midpoint": 2047,
+                "encoder_offset_register_raw": 3761,
+                "motor2_required_team_deg": -20.400850987147898,
+                "direction_verified": true,
+                "precision_alignment_verified": false,
+                "captured_at": "2026-10-29T07:17:10.986449+00:00",
+                "method": "User aligned forearm approximately horizontal; compensated shoulder using existing calibrated encoder."
+            },
+            "direction_verification": {
+                "method": "User manually lowered forearm about motor2 with motor1 held and motor2 torque off",
+                "reference_raw": 2047,
+                "lowered_raw": 2297,
+                "raw_delta": 250,
+                "encoder_angle_delta_deg": 21.97265625,
+                "motor1_raw_before": 1999,
+                "motor1_raw_after": 2000,
+                "motor3_and_motor4_unchanged": true,
+                "captured_at": "2026-10-29T07:30:30.982615+00:00",
+                "position_samples": 10,
+                "sample_spread_ticks": 0
+            },
+            "operating_limit_measurements": {
+                "motor_id": 2,
+                "hardware_offset_raw": 3761,
+                "software_zero_provisional": 1815,
+                "reference_quality": "approximate_user_horizontal_alignment",
+                "direction_verified": true,
+                "lower": {
+                    "captured_at": "2026-10-29T07:41:59.381478+00:00",
+                    "raw_position": 3043.0,
+                    "position_samples": 10,
+                    "sample_spread_ticks": 0,
+                    "all_joint_positions": {
+                        "1": 2000.0,
+                        "2": 3043.0,
+                        "3": 424.0,
+                        "4": 2865.0
+                    },
+                    "torque_states": {
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                    },
+                    "source": "poco_motor2_lower_limit_2026-10-29.json",
+                    "endpoint_type": "user_selected_usable_lower_limit"
+                },
+                "upper": {
+                    "captured_at": "2026-10-29T07:44:11.062266+00:00",
+                    "raw_position": 770,
+                    "position_samples": 10,
+                    "sample_spread_ticks": 0,
+                    "all_joint_positions": {
+                        "1": 1998,
+                        "2": 770,
+                        "3": 422,
+                        "4": 2865
+                    },
+                    "torque_states": {
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                    },
+                    "source": "poco_motor2_upper_limit_2026-10-29.json",
+                    "endpoint_type": "user_selected_usable_upper_limit"
+                },
+                "margin_plan_ticks": 35,
+                "scope": "Endpoint depends on recorded posture of other joints. Motor3/4 were manually repositioned for clearance; this is not global collision validation.",
+                "inward_margin_ticks": 35,
+                "inward_margin_deg": 3.076171875,
+                "measured_range_with_margin": [
+                    805,
+                    3008
+                ],
+                "previous_general_range_translated_to_new_zero": [
+                    801,
+                    2831
+                ],
+                "nominal_range": [
+                    713,
+                    2917
+                ],
+                "candidate_general_range": [
+                    805,
+                    2831
+                ],
+                "selection": "intersection of measured range with margin, prior general range, and nominal range"
+            },
+            "powered_test": {
+                "captured_at": "2026-10-29T08:17:37.763052+00:00",
+                "audit": "/tmp/poco-functional-small-jog-20261029T081737Z.json",
+                "success": true,
+                "command_delta_ticks": 20,
+                "command_delta_deg": 1.7578125,
+                "speed_raw": 20,
+                "acceleration_raw": 1,
+                "ram_output_limit_raw": 300,
+                "settling_tolerance_ticks": 8,
+                "max_settled_error_ticks": 6,
+                "actual_bidirectional_motion_verified": true,
+                "strict_3_tick_return_test_failed_on_motor1": false,
+                "support_present": true,
+                "unsupported_payload_validated": false,
+                "full_workspace_collision_validated": false,
+                "configured_max_speed_1000_validated": false
+            }
+        },
+        "3": {
+            "servo_id": 3,
+            "joint": "wrist_flex",
+            "direction": 1,
+            "raw_position_increase_motion": "손목 끝단이 아래 방향으로 이동",
+            "raw_position_decrease_motion": "손목 끝단이 위 방향으로 이동",
+            "direction_reference": "wrist_flex 굽힘/펴짐 움직임 기준",
+            "zero_position": 2048,
+            "urdf_min_angle_rad": -1.65806,
+            "urdf_max_angle_rad": 1.65806,
+            "position_at_urdf_min_angle": 967,
+            "position_at_urdf_max_angle": 3129,
+            "safe_position_at_min_angle": 985,
+            "safe_position_at_max_angle": 3123,
+            "max_speed": 1000,
+            "calibration_status": "low_speed_functional_verified_precision_and_payload_validation_pending",
+            "replacement_model": "STS3250",
+            "persistent_id_verified": 3,
+            "replacement_confirmed_by_user": true,
+            "reference_measurement": {
+                "reference_definition": "Monitor screen upright at recorded near-horizontal forearm pose; approximate working reference, not verified old URDF zero.",
+                "reference_quality": "approximate_user_alignment",
+                "old_urdf_zero_equivalence_verified": false,
+                "upright_position_raw_before_midpoint": 1403,
+                "upright_position_raw_after_midpoint": 2048,
+                "hardware_offset_raw": 2692,
+                "other_joint_reference_positions": {
+                    "1": 2000,
+                    "2": 2065,
+                    "4": 2864
+                },
+                "zero_candidate": 2048,
+                "direction_verified": true,
+                "mechanical_limits_verified": true,
+                "active_software_zero_applied": true,
+                "captured_at": "2026-10-29T07:54:10.388003+00:00",
+                "previous_user_and_imu_reference_revalidation_required": true,
+                "direction": 1,
+                "direction_verification": {
+                    "method": "User tilted screen face downward about motor3 while other joints held",
+                    "reference_raw": 2048,
+                    "tilted_raw": 2399,
+                    "raw_delta": 351,
+                    "encoder_angle_delta_deg": 30.849609375,
+                    "captured_at": "2026-10-29T07:58:07.797050+00:00",
+                    "all_joint_positions": {
+                        "1": 1998,
+                        "2": 2065,
+                        "3": 2399,
+                        "4": 2863
+                    },
+                    "sample_count": 10,
+                    "sample_spread_ticks": 0
+                },
+                "mechanical_limit_scope": "User measured endpoints only; powered motion and global collision tests pending."
+            },
+            "direction_verification": {
+                "method": "User tilted screen face downward about motor3 while other joints held",
+                "reference_raw": 2048,
+                "tilted_raw": 2399,
+                "raw_delta": 351,
+                "encoder_angle_delta_deg": 30.849609375,
+                "captured_at": "2026-10-29T07:58:07.797050+00:00",
+                "all_joint_positions": {
+                    "1": 1998,
+                    "2": 2065,
+                    "3": 2399,
+                    "4": 2863
+                },
+                "sample_count": 10,
+                "sample_spread_ticks": 0
+            },
+            "operating_limit_measurements": {
+                "motor_id": 3,
+                "hardware_offset_raw": 2692,
+                "provisional_zero": 2048,
+                "direction_verified": true,
+                "lower": {
+                    "captured_at": "2026-10-29T08:01:19.885562+00:00",
+                    "raw_position": 3192,
+                    "all_joint_positions": {
+                        "1": 2001,
+                        "2": 2067,
+                        "3": 3192,
+                        "4": 2865
+                    },
+                    "torque_states": {
+                        "1": 1,
+                        "2": 1,
+                        "3": 0,
+                        "4": 1
+                    },
+                    "position_samples": 10,
+                    "sample_spread_ticks": 0,
+                    "source": "poco_motor3_lower_limit_2026-10-29.json",
+                    "endpoint_type": "user_selected_usable_monitor_face_down_limit"
+                },
+                "upper": {
+                    "captured_at": "2026-10-29T08:03:12.534615+00:00",
+                    "raw_position": 875,
+                    "all_joint_positions": {
+                        "1": 2001,
+                        "2": 2067,
+                        "3": 875,
+                        "4": 2864
+                    },
+                    "torque_states": {
+                        "1": 1,
+                        "2": 1,
+                        "3": 0,
+                        "4": 1
+                    },
+                    "position_samples": 10,
+                    "sample_spread_ticks": 0,
+                    "source": "poco_motor3_upper_limit_2026-10-29.json",
+                    "endpoint_type": "user_selected_usable_monitor_face_up_limit"
+                },
+                "planned_margin_ticks": 35,
+                "scope": "User-supported wrist limits at recorded shoulder/elbow/roll pose, not a global collision or payload test.",
+                "inward_margin_ticks": 35,
+                "inward_margin_deg": 3.076171875,
+                "measured_range_with_margin": [
+                    910,
+                    3157
+                ],
+                "previous_command_angle_span_cap_at_new_working_zero": [
+                    985,
+                    3123
+                ],
+                "nominal_range": [
+                    967,
+                    3129
+                ],
+                "candidate_general_range": [
+                    985,
+                    3123
+                ],
+                "selection": "Intersection of measured margin bounds and conservative command-angle caps. New working zero is not asserted to equal old URDF physical datum."
+            },
+            "powered_test": {
+                "captured_at": "2026-10-29T08:17:37.763052+00:00",
+                "audit": "/tmp/poco-functional-small-jog-20261029T081737Z.json",
+                "success": true,
+                "command_delta_ticks": 20,
+                "command_delta_deg": 1.7578125,
+                "speed_raw": 20,
+                "acceleration_raw": 1,
+                "ram_output_limit_raw": 300,
+                "settling_tolerance_ticks": 8,
+                "max_settled_error_ticks": 1,
+                "actual_bidirectional_motion_verified": true,
+                "strict_3_tick_return_test_failed_on_motor1": false,
+                "support_present": true,
+                "unsupported_payload_validated": false,
+                "full_workspace_collision_validated": false,
+                "configured_max_speed_1000_validated": false
+            }
+        },
+        "4": {
+            "servo_id": 4,
+            "joint": "wrist_roll",
+            "direction": -1,
+            "raw_position_increase_motion": "CW",
+            "raw_position_decrease_motion": "CCW",
+            "direction_reference": "모니터가 위치한 정면에서 로봇팔을 바라보는 기준",
+            "zero_position": 2875,
+            "urdf_min_angle_rad": -2.74385,
+            "urdf_max_angle_rad": 2.84121,
+            "position_at_urdf_min_angle": 4095,
+            "position_at_urdf_max_angle": 1023,
+            "safe_position_at_min_angle": 4095,
+            "safe_position_at_max_angle": 1023,
+            "max_speed": 1000
+        }
+    }
+}
